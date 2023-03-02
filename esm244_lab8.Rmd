@@ -1,0 +1,164 @@
+---
+title: "Lab 8"
+author: "Katheryn Moya"
+date: "3/2/2023"
+output: html_document
+---
+
+```{r setup, echo=TRUE, warning = FALSE, message = FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+library(spatstat)
+library(terra)
+library(sf)
+library(tidyverse)
+library(here)
+library(tmap)
+```
+
+## Read in red tree vole data
+
+```{r}
+voles_sf <- read_sf(dsn = here("redtreevoledata"),
+                    layer = 'ds033') %>% #data source name 
+  janitor::clean_names() %>% 
+  select(county) %>% #sticky geometry -- will keep the geometry even though we didn't select that variable
+  filter(county == "HUM") %>% 
+#need to check CRS 
+  st_transform(crs = 32610) #ESPG code for zone 10 (for CA)
+
+plot(voles_sf)
+```
+
+
+## Get Humboldt County outline
+
+```{r}
+# need to know the zone in which we're looking for the pattern of occurrences
+
+humboldt_sf <- read_sf(here("redtreevoledata","california_county_shape_file.shp")) %>% 
+  janitor::clean_names() %>% 
+  filter(name %in% "Humboldt") %>% 
+  select(name)  %>% 
+  
+# looking at the files, we're missing the .prj which tells us the projection
+#st_crs(humboldt_sf) -- says CRS is NA (we don't want that)
+
+  st_set_crs(4326) %>%  # this is how we set a crs to something else
+  st_transform(32610) # not setting it at first because this code is in meters, not in degrees
+
+```
+
+## Plot the data and the county
+
+```{r}
+ggplot() +
+  geom_sf(data = humboldt_sf,
+          color = "darkorchid",
+          fill = "darkorchid4",
+          size = 1) +
+  geom_sf(data = voles_sf,
+          color = "orange",
+          alpha = .7,
+          size = 2) +
+  theme_void()
+```
+
+Now we need to convert the sf's into something that can be used to complete a spatial statistical analysis (using spatstat)
+
+## Convert "sf" objects to "spatstat" objects
+
+```{r}
+# convert voles observations to spatial point pattern 
+
+voles_ppp <- as.ppp(voles_sf)
+
+# convert county to an observation window (owin)
+humboldt_win <- as.owin(humboldt_sf)
+
+# combine together into a point pattern object (points + window)
+
+voles_full <- ppp(voles_ppp$x, voles_ppp$y, window = humboldt_win)
+
+plot(voles_full)
+```
+
+## Make a kernel density plot
+
+```{r}
+voles_density <- density(voles_full, sigma = 5000) # taking each of those points and saying they're the center of the probability field/distribution and that field has some spread to it, sigma is the width of variation, making the standard deviation wider
+
+plot(voles_density)
+
+```
+
+## Map it in tmap
+
+```{r}
+# convert density objectto a raster
+
+vole_r <- rast(voles_density) # one of the work horses of the terra packages
+crs(vole_r) <- crs(voles_sf) #taking voles_sf object and taking it to crs and applying it to the raster
+
+# now plot it 
+
+tmap_mode("view")
+tm_shape(vole_r) +
+  tm_raster(midpoint = NA, # may be dependent on palette
+            palette = "Reds", 
+            legend.show = FALSE)
+```
+
+## Let's statistically analyze with a G function
+
+```{r}
+# make a sequence of distances over which we'll calculate G(r)
+
+r_vec <- seq(0,10000, by= 100)
+
+gfunction <- envelope(voles_full, fun = Gest, r = r_vec,
+                      nsim = 100) # trying to compare this to complete spatial randomness, but we also want to get an idea of a 95% confidence interval, doing 100 rounds of spatial randomness so we can see where we fall, helps us calculate what would be the normal bounds of complete spatial randomness
+
+gfunction_long <- gfunction %>% 
+  as.data.frame() %>% 
+  pivot_longer(names_to = "model", values_to = "g_val",
+               cols = obs:hi) # going to take this thing with 5 columns, and consolidates them for each observation
+
+ggplot(data = gfunction_long, 
+       aes(x = r, y = g_val)) +
+  geom_line(aes(color = model, group = model)) +
+  theme_minimal() +
+  labs(x = "radius (m)", y = "G(r)")
+
+# purple = theoretical g function based on perfect randomness
+# green = taking lowest values across 100 simulations
+# red = high end of the scale
+# blue = observations
+# it seemed like there were some clumps when we first observed the data, does this graph justify this assertion that voles tend to clump together or do they spread out or are they spaced randomly? because this is well above even the highest of spatial randomness, we can say they are clustered together, if we're in the purple line it's still in the bounds of random chance, below green would be uniformly spread out
+```
+
+## Let's try an L function
+```{r}
+# l funciton - comparing distance between each observation and every other observation (not just the nearest neighbor)
+
+r_vec2 <- seq(0, 80000, by = 5000) # using this number because the processing time is slow, not just comparing to nearest neighbor
+
+lfunction <- envelope(voles_full, fun = Lest, r = r_vec2,
+                      nsim = 10) # envelope = simulates the CSR around the functions
+
+# before we were looking at the percent of voles having a neighbor within a certain radius, we are looking at the theoritcal values will be a straight line but we will still be looking at where our observed curve will be
+
+lfunction_long <- lfunction %>% 
+  as.data.frame() %>% 
+  pivot_longer(cols = obs:hi, names_to = "model", values_to = "l") # to get it into a tidy format
+
+
+ggplot(data = lfunction_long, 
+       aes(x = r, y = l)) +
+  geom_line(aes(color = model, group = model)) +
+  theme_minimal() +
+  labs(x = "radius(m)", y = "l(r)")
+
+# observed values are out of the bounds of the theoretical and the simulations we ran
+```
+
